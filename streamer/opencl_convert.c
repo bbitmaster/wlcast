@@ -23,7 +23,8 @@ typedef cl_mem (*clImportMemoryARM_fn)(cl_context, cl_mem_flags,
  * Input: XRGB8888 (BGRX in memory) - 4 bytes per pixel
  * Output: YUYV (packed) - 2 bytes per pixel
  *
- * Uses BT.601 coefficients for YUV conversion.
+ * Uses JFIF full-range YCbCr (Y: 0-255, Cb/Cr: 0-255 centered at 128).
+ * This matches what JPEG expects, NOT BT.601 limited range.
  */
 static const char *xrgb_to_yuyv_kernel_src =
 "__kernel void xrgb_to_yuyv(__global const uchar4 *input,\n"
@@ -43,18 +44,18 @@ static const char *xrgb_to_yuyv_kernel_src =
 "    float r0 = (float)p0.z, g0 = (float)p0.y, b0 = (float)p0.x;\n"
 "    float r1 = (float)p1.z, g1 = (float)p1.y, b1 = (float)p1.x;\n"
 "    \n"
-"    /* BT.601 Y calculation */\n"
-"    float y0 = 16.0f + 0.257f * r0 + 0.504f * g0 + 0.098f * b0;\n"
-"    float y1 = 16.0f + 0.257f * r1 + 0.504f * g1 + 0.098f * b1;\n"
+"    /* JFIF full-range Y (0-255, no offset) */\n"
+"    float y0 = 0.299f * r0 + 0.587f * g0 + 0.114f * b0;\n"
+"    float y1 = 0.299f * r1 + 0.587f * g1 + 0.114f * b1;\n"
 "    \n"
 "    /* Average RGB for chroma subsampling */\n"
 "    float r_avg = (r0 + r1) * 0.5f;\n"
 "    float g_avg = (g0 + g1) * 0.5f;\n"
 "    float b_avg = (b0 + b1) * 0.5f;\n"
 "    \n"
-"    /* BT.601 U and V calculation */\n"
-"    float u = 128.0f - 0.148f * r_avg - 0.291f * g_avg + 0.439f * b_avg;\n"
-"    float v = 128.0f + 0.439f * r_avg - 0.368f * g_avg - 0.071f * b_avg;\n"
+"    /* JFIF full-range Cb/Cr (centered at 128) */\n"
+"    float u = 128.0f - 0.169f * r_avg - 0.331f * g_avg + 0.500f * b_avg;\n"
+"    float v = 128.0f + 0.500f * r_avg - 0.419f * g_avg - 0.081f * b_avg;\n"
 "    \n"
 "    /* Pack as YUYV */\n"
 "    uchar4 out;\n"
