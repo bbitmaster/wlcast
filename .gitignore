@@ -1,0 +1,31 @@
+# Build artifacts
+*.o
+*.a
+*.so
+
+# Binaries
+wlcast-stream
+wlcast-view
+v4l2_probe
+cl_extensions
+opencl_test
+opencl_convert
+opencl_convert_full
+opencl_dmabuf_test
+opencl_benchmark
+rga_probe
+
+# Generated protocol code
+streamer/gen/
+viewer/gen/
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
