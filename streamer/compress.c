@@ -97,3 +97,9 @@ void jpeg_encoder_destroy(struct jpeg_encoder *enc) {
   }
   memset(enc, 0, sizeof(*enc));
 }
+
+void jpeg_encoder_set_quality(struct jpeg_encoder *enc, int quality) {
+  if (enc) {
+    enc->quality = quality;
+  }
+}

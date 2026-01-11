@@ -9,10 +9,15 @@ struct udp_receiver;
 struct frame_buffer {
   uint8_t *data;
   size_t size;
+  uint32_t frame_id;  /* Frame ID for ACK */
 };
 
 int udp_receiver_init(struct udp_receiver **out, uint16_t port);
 int udp_receiver_poll(struct udp_receiver *rx, struct frame_buffer *out);
 void udp_receiver_destroy(struct udp_receiver *rx);
+
+/* Send ACK for a received frame (call after displaying) */
+void udp_receiver_send_ack(struct udp_receiver *rx, uint32_t frame_id,
+                           uint32_t viewer_fps);
 
 #endif

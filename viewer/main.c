@@ -120,6 +120,9 @@ int main(int argc, char **argv) {
           SDL_RenderPresent(renderer);
         }
         fps_counter++;
+
+        /* Send ACK back to streamer for network-based quality adaptation */
+        udp_receiver_send_ack(receiver, frame.frame_id, fps_counter);
       }
     }
 

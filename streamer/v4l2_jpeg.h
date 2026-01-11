@@ -56,4 +56,9 @@ int v4l2_jpeg_encode_nv12(struct v4l2_jpeg_encoder *enc,
 
 void v4l2_jpeg_destroy(struct v4l2_jpeg_encoder *enc);
 
+/**
+ * Update JPEG quality on the fly (for adaptive quality).
+ */
+int v4l2_jpeg_set_quality(struct v4l2_jpeg_encoder *enc, int quality);
+
 #endif

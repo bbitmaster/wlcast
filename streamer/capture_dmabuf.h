@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 struct dmabuf_capture_context;
+struct dmabuf_pending_frame;
 
 /* Information about a captured DMABUF frame */
 struct dmabuf_frame {
@@ -46,5 +47,32 @@ void dmabuf_frame_release(struct dmabuf_frame *frame);
 
 /* Shutdown and free resources */
 void dmabuf_capture_shutdown(struct dmabuf_capture_context *ctx);
+
+/* === Async capture API for pipelining === */
+
+/* Start capturing a frame asynchronously.
+ * Returns a pending frame handle, or NULL on error.
+ * Must be finished with dmabuf_capture_finish() or dmabuf_capture_cancel(). */
+struct dmabuf_pending_frame *dmabuf_capture_request(struct dmabuf_capture_context *ctx);
+
+/* Check if a pending frame is ready (non-blocking).
+ * Returns 1 if ready, 0 if still pending, -1 on error. */
+int dmabuf_capture_poll(struct dmabuf_capture_context *ctx,
+                        struct dmabuf_pending_frame *pending);
+
+/* Wait for pending frame and retrieve result (blocking).
+ * Returns 0 on success, -1 on failure.
+ * Frees the pending frame handle. */
+int dmabuf_capture_finish(struct dmabuf_capture_context *ctx,
+                          struct dmabuf_pending_frame *pending,
+                          struct dmabuf_frame *out);
+
+/* Cancel a pending frame request.
+ * Frees the pending frame handle. */
+void dmabuf_capture_cancel(struct dmabuf_pending_frame *pending);
+
+/* Get the wayland display FD for external polling.
+ * Can be used with poll()/select() to wait for frame readiness. */
+int dmabuf_capture_get_fd(struct dmabuf_capture_context *ctx);
 
 #endif /* WLCAST_CAPTURE_DMABUF_H */

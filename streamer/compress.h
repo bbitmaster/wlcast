@@ -20,5 +20,6 @@ int jpeg_encoder_init(struct jpeg_encoder *enc, int quality);
 int jpeg_encode_frame(struct jpeg_encoder *enc, const struct capture_frame *frame,
                       unsigned char **out_buf, unsigned long *out_size);
 void jpeg_encoder_destroy(struct jpeg_encoder *enc);
+void jpeg_encoder_set_quality(struct jpeg_encoder *enc, int quality);
 
 #endif

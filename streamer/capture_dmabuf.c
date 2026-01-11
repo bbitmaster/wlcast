@@ -3,6 +3,7 @@
 #include "capture_dmabuf.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,12 @@ struct frame_state {
   int frame_received;
   int objects_received;
   int expected_objects;
+};
+
+/* Async pending frame - holds state between request and finish */
+struct dmabuf_pending_frame {
+  struct frame_state state;
+  struct dmabuf_frame frame_data;
 };
 
 static void frame_handle_frame(void *data,
@@ -320,4 +327,135 @@ void dmabuf_capture_shutdown(struct dmabuf_capture_context *ctx) {
   }
 
   free(ctx);
+}
+
+/* === Async capture API implementation === */
+
+struct dmabuf_pending_frame *dmabuf_capture_request(struct dmabuf_capture_context *ctx) {
+  if (!ctx) {
+    return NULL;
+  }
+
+  struct dmabuf_pending_frame *pending = calloc(1, sizeof(*pending));
+  if (!pending) {
+    return NULL;
+  }
+
+  /* Initialize frame data with invalid FDs */
+  for (int i = 0; i < 4; i++) {
+    pending->frame_data.objects[i].fd = -1;
+  }
+
+  pending->state.ctx = ctx;
+  pending->state.out = &pending->frame_data;
+
+  /* Start the capture */
+  pending->state.frame = zwlr_export_dmabuf_manager_v1_capture_output(
+      ctx->manager, ctx->overlay_cursor, ctx->output);
+  if (!pending->state.frame) {
+    fprintf(stderr, "dmabuf: async capture_output failed\n");
+    free(pending);
+    return NULL;
+  }
+
+  zwlr_export_dmabuf_frame_v1_add_listener(pending->state.frame, &frame_listener,
+                                           &pending->state);
+  wl_display_flush(ctx->display);
+
+  return pending;
+}
+
+int dmabuf_capture_poll(struct dmabuf_capture_context *ctx,
+                        struct dmabuf_pending_frame *pending) {
+  if (!ctx || !pending) {
+    return -1;
+  }
+
+  /* Already done? */
+  if (pending->state.done) {
+    return pending->state.failed ? -1 : 1;
+  }
+
+  /* Non-blocking dispatch of pending events */
+  if (wl_display_prepare_read(ctx->display) != 0) {
+    /* Events already queued, dispatch them */
+    wl_display_dispatch_pending(ctx->display);
+  } else {
+    /* Check if data available (non-blocking) */
+    struct pollfd pfd = { wl_display_get_fd(ctx->display), POLLIN, 0 };
+    if (poll(&pfd, 1, 0) > 0) {
+      wl_display_read_events(ctx->display);
+      wl_display_dispatch_pending(ctx->display);
+    } else {
+      wl_display_cancel_read(ctx->display);
+    }
+  }
+
+  if (pending->state.done) {
+    return pending->state.failed ? -1 : 1;
+  }
+  return 0; /* Still pending */
+}
+
+int dmabuf_capture_finish(struct dmabuf_capture_context *ctx,
+                          struct dmabuf_pending_frame *pending,
+                          struct dmabuf_frame *out) {
+  if (!ctx || !pending || !out) {
+    return -1;
+  }
+
+  /* Wait until done */
+  while (!pending->state.done) {
+    if (wl_display_dispatch(ctx->display) < 0) {
+      fprintf(stderr, "dmabuf: wl_display_dispatch failed in finish\n");
+      pending->state.failed = 1;
+      break;
+    }
+  }
+
+  /* Destroy the protocol frame object */
+  zwlr_export_dmabuf_frame_v1_destroy(pending->state.frame);
+
+  if (pending->state.failed) {
+    /* Close any FDs we received before failure */
+    for (int i = 0; i < 4; i++) {
+      if (pending->frame_data.objects[i].fd >= 0) {
+        close(pending->frame_data.objects[i].fd);
+      }
+    }
+    free(pending);
+    return -1;
+  }
+
+  /* Copy frame data to output */
+  *out = pending->frame_data;
+  free(pending);
+  return 0;
+}
+
+void dmabuf_capture_cancel(struct dmabuf_pending_frame *pending) {
+  if (!pending) {
+    return;
+  }
+
+  /* Destroy protocol object */
+  if (pending->state.frame) {
+    zwlr_export_dmabuf_frame_v1_destroy(pending->state.frame);
+  }
+
+  /* Close any received FDs */
+  for (int i = 0; i < 4; i++) {
+    if (pending->frame_data.objects[i].fd >= 0) {
+      close(pending->frame_data.objects[i].fd);
+    }
+  }
+
+  free(pending);
+}
+
+int dmabuf_capture_get_fd(struct dmabuf_capture_context *ctx) {
+  if (!ctx || !ctx->display) {
+    return -1;
+  }
+  return wl_display_get_fd(ctx->display);
 }

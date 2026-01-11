@@ -25,6 +25,9 @@ struct udp_receiver {
   int assembling;
   int frame_ready;
   uint64_t last_update_ms;
+  /* Streamer address for sending ACKs */
+  struct sockaddr_in streamer_addr;
+  int streamer_known;
 };
 
 static uint64_t now_ms(void) {
@@ -122,7 +125,10 @@ int udp_receiver_poll(struct udp_receiver *rx, struct frame_buffer *out) {
 
   uint8_t packet[sizeof(struct wlcast_udp_header) + WLCAST_UDP_CHUNK_SIZE];
   while (1) {
-    ssize_t n = recvfrom(rx->fd, packet, sizeof(packet), 0, NULL, NULL);
+    struct sockaddr_in sender_addr;
+    socklen_t sender_len = sizeof(sender_addr);
+    ssize_t n = recvfrom(rx->fd, packet, sizeof(packet), 0,
+                         (struct sockaddr *)&sender_addr, &sender_len);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         break;
@@ -130,6 +136,10 @@ int udp_receiver_poll(struct udp_receiver *rx, struct frame_buffer *out) {
       perror("recvfrom");
       return -1;
     }
+
+    /* Always update streamer address for ACKs (handles streamer restart) */
+    rx->streamer_addr = sender_addr;
+    rx->streamer_known = 1;
 
     if (n < (ssize_t)sizeof(struct wlcast_udp_header)) {
       continue;
@@ -193,12 +203,28 @@ int udp_receiver_poll(struct udp_receiver *rx, struct frame_buffer *out) {
       rx->assembling = 0;
       out->data = rx->data;
       out->size = rx->total_size;
+      out->frame_id = rx->frame_id;
       rx->frame_ready = 0;
       return 1;
     }
   }
 
   return 0;
+}
+
+void udp_receiver_send_ack(struct udp_receiver *rx, uint32_t frame_id,
+                           uint32_t viewer_fps) {
+  if (!rx || !rx->streamer_known) {
+    return;
+  }
+
+  struct wlcast_ack_packet ack;
+  ack.magic = htonl(WLCAST_ACK_MAGIC);
+  ack.frame_id = htonl(frame_id);
+  ack.viewer_fps = htonl(viewer_fps);
+
+  sendto(rx->fd, &ack, sizeof(ack), 0, (struct sockaddr *)&rx->streamer_addr,
+         sizeof(rx->streamer_addr));
 }
 
 void udp_receiver_destroy(struct udp_receiver *rx) {

@@ -43,11 +43,12 @@ static void sleep_ms(uint64_t ms) {
 static void print_usage(const char *prog) {
   fprintf(stderr,
           "Usage: %s --dest <ip> [--port <port>] [--quality <1-100>] "
-          "[--fps <limit>] [--region x y w h] [--hw-jpeg] [--dmabuf] [--rga] [--opencl] [--no-cursor]\n"
-          "  --dmabuf    Use wlr-export-dmabuf (zero-copy capture, reduces compositor load)\n"
-          "  --rga       Use RGA for hardware color conversion (requires --dmabuf --hw-jpeg)\n"
+          "[--fps <limit>] [--target-fps <fps>] [--region x y w h] [--hw-jpeg] [--dmabuf] [--rga] [--opencl] [--no-cursor]\n"
+          "  --target-fps  Adaptive quality: auto-adjust quality to hit target FPS (default: 0=off)\n"
+          "  --dmabuf      Use wlr-export-dmabuf (zero-copy capture, reduces compositor load)\n"
+          "  --rga         Use RGA for hardware color conversion (requires --dmabuf --hw-jpeg)\n"
 #ifdef HAVE_OPENCL
-          "  --opencl    Use OpenCL for GPU color conversion (requires --dmabuf --hw-jpeg, libmali)\n"
+          "  --opencl      Use OpenCL for GPU color conversion (requires --dmabuf --hw-jpeg, libmali)\n"
 #endif
           ,
           prog);
@@ -58,6 +59,7 @@ int main(int argc, char **argv) {
   uint16_t port = 7723;
   int quality = 80;
   int fps_limit = 0;
+  int target_fps = 0;  /* 0 = adaptive quality disabled */
   int overlay_cursor = 1;
   int region_x = 0;
   int region_y = 0;
@@ -77,6 +79,8 @@ int main(int argc, char **argv) {
       quality = atoi(argv[++i]);
     } else if (strcmp(argv[i], "--fps") == 0 && i + 1 < argc) {
       fps_limit = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--target-fps") == 0 && i + 1 < argc) {
+      target_fps = atoi(argv[++i]);
     } else if (strcmp(argv[i], "--region") == 0 && i + 4 < argc) {
       region_x = atoi(argv[++i]);
       region_y = atoi(argv[++i]);
@@ -209,14 +213,41 @@ int main(int argc, char **argv) {
   uint64_t last_fps_ts = now_ms();
   unsigned int frame_counter = 0;
 
+  /* Pipelining state for OpenCL path */
+  struct dmabuf_pending_frame *pending_capture = NULL;
+  int pipeline_active = 0;
+
+  /* Timing debug (enable with SM_TIMING_DEBUG=1) */
+  int timing_debug = (getenv("SM_TIMING_DEBUG") != NULL);
+  uint64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+  (void)t0; (void)t1; (void)t2; (void)t3; (void)t4; /* Suppress unused warnings */
+
   while (g_running) {
     uint64_t frame_start = now_ms();
     struct capture_frame frame;
     struct dmabuf_frame dma_frame;
     int capture_ok = 0;
 
+    if (timing_debug) t0 = now_ms();
+
     if (use_dmabuf) {
+#ifdef HAVE_OPENCL
+      if (use_opencl && pipeline_active && pending_capture) {
+        /* Pipelined path: wait for previously requested frame */
+        if (dmabuf_capture_finish(dmabuf_capture, pending_capture, &dma_frame) == 0) {
+          capture_ok = 1;
+          if (timing_debug) t1 = now_ms();
+          /* Immediately request next frame to maintain pipeline */
+          pending_capture = dmabuf_capture_request(dmabuf_capture);
+          if (timing_debug) fprintf(stderr, "[PIPE] wait=%lums ", (unsigned long)(t1 - t0));
+        } else {
+          fprintf(stderr, "dmabuf pipelined capture failed\n");
+          pending_capture = NULL;
+        }
+      } else
+#endif
       if (dmabuf_capture_next_frame(dmabuf_capture, &dma_frame) == 0) {
+        if (timing_debug) t1 = now_ms();
         if (use_rga) {
           /* RGA path: map the dmabuf for potential USERPTR fallback */
           if (dmabuf_frame_map(&dma_frame) == 0) {
@@ -229,6 +260,12 @@ int main(int argc, char **argv) {
         } else if (use_opencl) {
           /* OpenCL path: only need the dmabuf FD, skip CPU mapping */
           capture_ok = 1;
+          /* Request next frame NOW so capture overlaps with convert+encode */
+          if (pipeline_active) {
+            pending_capture = dmabuf_capture_request(dmabuf_capture);
+          }
+          pipeline_active = 1; /* Enable pipelining after first frame */
+          if (timing_debug) fprintf(stderr, "[SYNC] cap=%lums ", (unsigned long)(t1 - t0));
 #endif
         } else if (dmabuf_frame_map(&dma_frame) == 0) {
           frame.format = dma_frame.format;
@@ -288,6 +325,7 @@ int main(int argc, char **argv) {
       }
 
       /* Convert XRGB → YUYV using OpenCL (zero-copy dmabuf import) */
+      if (timing_debug) t2 = now_ms();
       int output_fd;
       size_t output_size;
       size_t input_size = (size_t)w * h * 4;
@@ -297,6 +335,7 @@ int main(int argc, char **argv) {
         dmabuf_frame_release(&dma_frame);
         continue;
       }
+      if (timing_debug) t3 = now_ms();
 
       /* Get mapped YUYV data for JPEG encoder */
       void *yuyv_data;
@@ -317,6 +356,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "HW JPEG encode (OpenCL) failed\n");
         dmabuf_frame_release(&dma_frame);
         continue;
+      }
+      if (timing_debug) {
+        t4 = now_ms();
+        fprintf(stderr, "ocl=%lums enc=%lums ", (unsigned long)(t3 - t2), (unsigned long)(t4 - t3));
       }
     } else
 #endif
@@ -397,21 +440,188 @@ int main(int argc, char **argv) {
     }
 
     /* Release dmabuf after encoding (all error paths above handle their own release) */
+    uint64_t t5 = 0, t6 = 0;
+    if (timing_debug) t5 = now_ms();
     if (use_dmabuf) {
       dmabuf_frame_release(&dma_frame);
     }
+    if (timing_debug) t6 = now_ms();
 
     if (udp_sender_send_frame(&sender, jpeg_data, jpeg_size) != 0) {
       fprintf(stderr, "UDP send failed\n");
       break;
     }
 
+    /* Poll for ACKs from viewer */
+    udp_sender_poll_acks(&sender);
+
+    if (timing_debug) {
+      uint64_t t7 = now_ms();
+      fprintf(stderr, "rel=%lums udp=%lums ", (unsigned long)(t6 - t5), (unsigned long)(t7 - t6));
+    }
+
     frame_counter++;
     uint64_t now = now_ms();
+    static unsigned long total_jpeg_bytes = 0;
+    total_jpeg_bytes += jpeg_size;
     if (now - last_fps_ts >= 1000u) {
-      fprintf(stderr, "fps=%u\n", frame_counter);
+      unsigned long avg_kb = frame_counter > 0 ? (total_jpeg_bytes / 1024) / frame_counter : 0;
+      const struct network_stats *net = udp_sender_get_stats(&sender);
+      int old_quality = quality;
+
+      /* Adaptive target FPS: lower target when quality stuck at floor */
+      static int effective_target_fps = 0;
+      static int quality_floor_seconds = 0;
+      static int quality_recovered_seconds = 0;
+      if (effective_target_fps == 0) {
+        effective_target_fps = target_fps;  /* Initialize on first run */
+      }
+
+      /* Adaptive quality: use network feedback if viewer connected, else local FPS */
+      if (target_fps > 0) {
+        if (net->viewer_connected) {
+          /* Network-based adaptation: use packet loss and RTT */
+          int loss_pct = 0;
+          if (net->frames_sent > 0) {
+            loss_pct = (net->frames_lost * 100) / net->frames_sent;
+          }
+          double rtt = net->smoothed_rtt_ms;
+          double base_rtt = net->min_rtt_ms > 0 ? net->min_rtt_ms : rtt;
+
+          /* RTT thresholds relative to baseline */
+          double rtt_reduce = base_rtt * 3.0;   /* 3x baseline: reduce quality */
+          double rtt_hold = base_rtt * 2.0;     /* 2x baseline: hold steady */
+
+          if (loss_pct > 10) {
+            /* High packet loss: reduce quality aggressively */
+            quality -= 10;
+            if (quality < 30) quality = 30;
+          } else if (loss_pct > 3) {
+            /* Moderate loss: reduce quality */
+            quality -= 5;
+            if (quality < 50) quality = 50;
+          } else if (rtt > rtt_reduce) {
+            /* RTT too high: proactively reduce quality before loss occurs */
+            quality -= 3;
+            if (quality < 50) quality = 50;
+          } else if (rtt > rtt_hold) {
+            /* RTT elevated: hold quality steady, don't increase */
+            /* (do nothing) */
+          } else if (loss_pct == 0 && net->frames_acked > 5 && quality < 95) {
+            /* Low RTT, no loss, getting ACKs: can increase quality */
+            quality += 2;
+            if (quality > 95) quality = 95;
+          }
+
+          /* Print with network stats */
+          if (quality != old_quality) {
+            fprintf(stderr, "fps=%u avg_kb=%lu total_kb=%lu q=%d->%d [net: rtt=%.0f/%.0fms loss=%d%% acked=%d/%d]",
+                    frame_counter, avg_kb, total_jpeg_bytes / 1024, old_quality, quality,
+                    rtt, base_rtt, loss_pct, net->frames_acked, net->frames_sent);
+          } else {
+            fprintf(stderr, "fps=%u avg_kb=%lu total_kb=%lu q=%d [net: rtt=%.0f/%.0fms loss=%d%% acked=%d/%d]",
+                    frame_counter, avg_kb, total_jpeg_bytes / 1024, quality,
+                    rtt, base_rtt, loss_pct, net->frames_acked, net->frames_sent);
+          }
+          if (effective_target_fps != target_fps) {
+            fprintf(stderr, " target=%d", effective_target_fps);
+          }
+          fprintf(stderr, "\n");
+        } else {
+          /* No viewer: use local FPS-based adaptation */
+          int fps_diff = (int)frame_counter - effective_target_fps;
+
+          if (fps_diff < -5) {
+            quality -= 5;
+            if (quality < 50) quality = 50;
+          } else if (fps_diff >= 0 && quality < 95) {
+            quality += 2;
+            if (quality > 95) quality = 95;
+          }
+
+          if (effective_target_fps != target_fps) {
+            fprintf(stderr, "fps=%u avg_kb=%lu total_kb=%lu q=%d target=%d\n",
+                    frame_counter, avg_kb, total_jpeg_bytes / 1024, quality, effective_target_fps);
+          } else if (quality != old_quality) {
+            fprintf(stderr, "fps=%u avg_kb=%lu total_kb=%lu q=%d->%d\n",
+                    frame_counter, avg_kb, total_jpeg_bytes / 1024, old_quality, quality);
+          } else {
+            fprintf(stderr, "fps=%u avg_kb=%lu total_kb=%lu q=%d\n",
+                    frame_counter, avg_kb, total_jpeg_bytes / 1024, quality);
+          }
+        }
+
+        /* Update encoder quality if changed */
+        if (quality != old_quality) {
+          if (hw_encoder_ready) {
+            v4l2_jpeg_set_quality(&hw_encoder, quality);
+          }
+          if (sw_encoder_ready) {
+            jpeg_encoder_set_quality(&encoder, quality);
+          }
+        }
+
+        /* Adaptive target FPS: adjust when quality stuck at floor or recovered */
+        if (quality <= 35) {
+          /* Quality at or near floor */
+          quality_floor_seconds++;
+          quality_recovered_seconds = 0;
+          if (quality_floor_seconds >= 5 && effective_target_fps > 15) {
+            /* Stuck at floor for 5+ seconds: reduce target FPS */
+            effective_target_fps -= 10;
+            if (effective_target_fps < 15) effective_target_fps = 15;
+            quality_floor_seconds = 0;
+            /* Also throttle actual frame rate */
+            frame_interval_ms = 1000u / (uint64_t)effective_target_fps;
+            fprintf(stderr, "  -> target fps reduced to %d, throttling to %lums/frame\n",
+                    effective_target_fps, (unsigned long)frame_interval_ms);
+          }
+        } else if (quality >= 60 && effective_target_fps < target_fps) {
+          /* Quality recovered above 60 */
+          quality_floor_seconds = 0;
+          quality_recovered_seconds++;
+          if (quality_recovered_seconds >= 10) {
+            /* Stable for 10+ seconds: try increasing target FPS */
+            effective_target_fps += 5;
+            if (effective_target_fps > target_fps) effective_target_fps = target_fps;
+            quality_recovered_seconds = 0;
+            /* Update frame rate throttle */
+            if (effective_target_fps >= target_fps) {
+              frame_interval_ms = fps_limit > 0 ? 1000u / (uint64_t)fps_limit : 0;
+            } else {
+              frame_interval_ms = 1000u / (uint64_t)effective_target_fps;
+            }
+            fprintf(stderr, "  -> target fps increased to %d\n", effective_target_fps);
+          }
+        } else {
+          /* Quality in middle range - reset counters */
+          quality_floor_seconds = 0;
+          quality_recovered_seconds = 0;
+        }
+      } else {
+        /* No target FPS: just print stats */
+        if (net->viewer_connected) {
+          int loss_pct = net->frames_sent > 0 ? (net->frames_lost * 100) / net->frames_sent : 0;
+          double base_rtt = net->min_rtt_ms > 0 ? net->min_rtt_ms : net->smoothed_rtt_ms;
+          fprintf(stderr, "fps=%u avg_kb=%lu total_kb=%lu q=%d [net: rtt=%.0f/%.0fms loss=%d%% acked=%d/%d]\n",
+                  frame_counter, avg_kb, total_jpeg_bytes / 1024, quality,
+                  net->smoothed_rtt_ms, base_rtt, loss_pct, net->frames_acked, net->frames_sent);
+        } else {
+          fprintf(stderr, "fps=%u avg_kb=%lu total_kb=%lu q=%d\n",
+                  frame_counter, avg_kb, total_jpeg_bytes / 1024, quality);
+        }
+      }
+
+      /* Reset stats for next window */
+      udp_sender_reset_stats(&sender);
       frame_counter = 0;
+      total_jpeg_bytes = 0;
       last_fps_ts = now;
+    }
+
+    if (timing_debug) {
+      uint64_t loop_end = now_ms();
+      fprintf(stderr, "total=%lums\n", (unsigned long)(loop_end - frame_start));
     }
 
     if (frame_interval_ms > 0) {
@@ -432,6 +642,10 @@ int main(int argc, char **argv) {
     v4l2_rga_destroy(&rga_converter);
   }
 #ifdef HAVE_OPENCL
+  if (pending_capture) {
+    dmabuf_capture_cancel(pending_capture);
+    pending_capture = NULL;
+  }
   if (opencl_conv) {
     opencl_convert_destroy(opencl_conv);
   }

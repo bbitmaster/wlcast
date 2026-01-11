@@ -1573,3 +1573,21 @@ void v4l2_jpeg_destroy(struct v4l2_jpeg_encoder *enc) {
   memset(enc, 0, sizeof(*enc));
   enc->fd = -1;
 }
+
+int v4l2_jpeg_set_quality(struct v4l2_jpeg_encoder *enc, int quality) {
+  if (!enc || enc->fd < 0) {
+    return -1;
+  }
+
+  struct v4l2_control ctrl;
+  memset(&ctrl, 0, sizeof(ctrl));
+  ctrl.id = V4L2_CID_JPEG_COMPRESSION_QUALITY;
+  ctrl.value = quality;
+  if (xioctl(enc->fd, VIDIOC_S_CTRL, &ctrl) < 0) {
+    /* Quality control might not be supported, but that's okay */
+    return -1;
+  }
+
+  enc->quality = quality;
+  return 0;
+}
