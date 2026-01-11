@@ -12,6 +12,13 @@
 
 #include "../common/protocol.h"
 
+/* Audio packet queue */
+#define AUDIO_QUEUE_SIZE 32
+struct audio_queue_entry {
+  uint8_t data[1500];  /* Max UDP packet size */
+  size_t size;
+};
+
 struct udp_receiver {
   int fd;
   uint32_t frame_id;
@@ -28,6 +35,10 @@ struct udp_receiver {
   /* Streamer address for sending ACKs */
   struct sockaddr_in streamer_addr;
   int streamer_known;
+  /* Audio packet queue */
+  struct audio_queue_entry audio_queue[AUDIO_QUEUE_SIZE];
+  int audio_queue_head;
+  int audio_queue_tail;
 };
 
 static uint64_t now_ms(void) {
@@ -149,6 +160,22 @@ int udp_receiver_poll(struct udp_receiver *rx, struct frame_buffer *out) {
     memcpy(&header, packet, sizeof(header));
 
     uint32_t magic = ntohl(header.magic);
+
+    /* Check for audio packet */
+    if (magic == WLCAST_AUDIO_MAGIC) {
+      /* Queue audio packet for later polling */
+      int next_tail = (rx->audio_queue_tail + 1) % AUDIO_QUEUE_SIZE;
+      if (next_tail != rx->audio_queue_head) {
+        /* Queue not full */
+        struct audio_queue_entry *entry = &rx->audio_queue[rx->audio_queue_tail];
+        size_t copy_size = (size_t)n < sizeof(entry->data) ? (size_t)n : sizeof(entry->data);
+        memcpy(entry->data, packet, copy_size);
+        entry->size = copy_size;
+        rx->audio_queue_tail = next_tail;
+      }
+      continue;
+    }
+
     if (magic != WLCAST_UDP_MAGIC) {
       continue;
     }
@@ -210,6 +237,18 @@ int udp_receiver_poll(struct udp_receiver *rx, struct frame_buffer *out) {
   }
 
   return 0;
+}
+
+int udp_receiver_poll_audio(struct udp_receiver *rx, struct audio_packet *out) {
+  if (rx->audio_queue_head == rx->audio_queue_tail) {
+    return 0;  /* Queue empty */
+  }
+
+  struct audio_queue_entry *entry = &rx->audio_queue[rx->audio_queue_head];
+  out->data = entry->data;
+  out->size = entry->size;
+  rx->audio_queue_head = (rx->audio_queue_head + 1) % AUDIO_QUEUE_SIZE;
+  return 1;
 }
 
 void udp_receiver_send_ack(struct udp_receiver *rx, uint32_t frame_id,

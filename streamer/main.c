@@ -19,6 +19,10 @@
 #include "opencl_convert.h"
 #endif
 
+#ifdef HAVE_AUDIO
+#include "audio.h"
+#endif
+
 static volatile sig_atomic_t g_running = 1;
 
 static void handle_sigint(int sig) {
@@ -43,12 +47,15 @@ static void sleep_ms(uint64_t ms) {
 static void print_usage(const char *prog) {
   fprintf(stderr,
           "Usage: %s --dest <ip> [--port <port>] [--quality <1-100>] "
-          "[--fps <limit>] [--target-fps <fps>] [--region x y w h] [--hw-jpeg] [--dmabuf] [--rga] [--opencl] [--no-cursor]\n"
+          "[--fps <limit>] [--target-fps <fps>] [--region x y w h] [--hw-jpeg] [--dmabuf] [--rga] [--opencl] [--audio] [--no-cursor]\n"
           "  --target-fps  Adaptive quality: auto-adjust quality to hit target FPS (default: 0=off)\n"
           "  --dmabuf      Use wlr-export-dmabuf (zero-copy capture, reduces compositor load)\n"
           "  --rga         Use RGA for hardware color conversion (requires --dmabuf --hw-jpeg)\n"
 #ifdef HAVE_OPENCL
           "  --opencl      Use OpenCL for GPU color conversion (requires --dmabuf --hw-jpeg, libmali)\n"
+#endif
+#ifdef HAVE_AUDIO
+          "  --audio       Enable audio streaming (PulseAudio capture + Opus encoding)\n"
 #endif
           ,
           prog);
@@ -69,6 +76,9 @@ int main(int argc, char **argv) {
   int use_dmabuf = 0;
   int use_rga = 0;
   int use_opencl = 0;
+#ifdef HAVE_AUDIO
+  int use_audio = 0;
+#endif
 
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--dest") == 0 && i + 1 < argc) {
@@ -97,6 +107,13 @@ int main(int argc, char **argv) {
       use_opencl = 1;
 #else
       fprintf(stderr, "OpenCL support not compiled in (rebuild with OPENCL=1)\n");
+      return 1;
+#endif
+    } else if (strcmp(argv[i], "--audio") == 0) {
+#ifdef HAVE_AUDIO
+      use_audio = 1;
+#else
+      fprintf(stderr, "Audio support not compiled in (rebuild with AUDIO=1)\n");
       return 1;
 #endif
     } else if (strcmp(argv[i], "--no-cursor") == 0) {
@@ -194,6 +211,9 @@ int main(int argc, char **argv) {
 #ifdef HAVE_OPENCL
   struct opencl_converter *opencl_conv = NULL;
 #endif
+#ifdef HAVE_AUDIO
+  struct audio_streamer *audio = NULL;
+#endif
 
   if (!use_hw_jpeg) {
     if (jpeg_encoder_init(&encoder, quality) != 0) {
@@ -221,6 +241,21 @@ int main(int argc, char **argv) {
   int timing_debug = (getenv("SM_TIMING_DEBUG") != NULL);
   uint64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
   (void)t0; (void)t1; (void)t2; (void)t3; (void)t4; /* Suppress unused warnings */
+
+#ifdef HAVE_AUDIO
+  /* Initialize and start audio streaming */
+  if (use_audio) {
+    if (audio_streamer_init(&audio, dest_ip, port) != 0) {
+      fprintf(stderr, "Warning: Failed to initialize audio, continuing without\n");
+      use_audio = 0;
+    } else if (audio_streamer_start(audio) != 0) {
+      fprintf(stderr, "Warning: Failed to start audio, continuing without\n");
+      audio_streamer_destroy(audio);
+      audio = NULL;
+      use_audio = 0;
+    }
+  }
+#endif
 
   while (g_running) {
     uint64_t frame_start = now_ms();
@@ -648,6 +683,11 @@ int main(int argc, char **argv) {
   }
   if (opencl_conv) {
     opencl_convert_destroy(opencl_conv);
+  }
+#endif
+#ifdef HAVE_AUDIO
+  if (audio) {
+    audio_streamer_destroy(audio);
   }
 #endif
   udp_sender_close(&sender);

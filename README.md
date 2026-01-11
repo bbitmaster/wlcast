@@ -9,6 +9,7 @@ Captures the screen via `wlr-export-dmabuf`, encodes to JPEG using hardware acce
 - **Hardware JPEG encoding** via hantro-vpu (Rockchip)
 - **GPU color conversion** via OpenCL on Mali GPU (30+ fps)
 - **Zero-copy screen capture** via wlr-export-dmabuf protocol
+- **Audio streaming** via PulseAudio capture + Opus encoding
 - **NEON SIMD fallback** for CPU color conversion
 - **Software JPEG fallback** via libturbojpeg
 - **Simple UDP protocol** with automatic frame reassembly
@@ -31,9 +32,12 @@ Tested on Anbernic RG353PS (RK3566, 640x480 display):
 # Easiest way - use the helper script
 /storage/stream.sh 192.168.1.100
 
+# With audio streaming
+/storage/stream.sh 192.168.1.100 80 55 --audio
+
 # Or manually with all options
 XDG_RUNTIME_DIR=/run/0-runtime-dir WAYLAND_DISPLAY=wayland-1 \
-  /storage/wlcast/wlcast-stream --dest 192.168.1.100 --opencl
+  /storage/wlcast/wlcast-stream --dest 192.168.1.100 --opencl --audio
 ```
 
 ### On Desktop (Viewer)
@@ -55,10 +59,13 @@ sudo ufw allow 7723/udp
   - wayland-client
   - libturbojpeg
   - wayland-scanner
+  - libpulse (for audio)
+  - libopus (for audio)
 
 **Viewer (native build):**
 - SDL2
 - libturbojpeg
+- libopus (for audio)
 
 ### Cross-Compile Streamer (Recommended)
 
@@ -69,6 +76,9 @@ cd streamer
 
 # Set up toolchain path in cross-compile.sh, then:
 ./cross-compile.sh OPENCL=1
+
+# With audio support:
+./cross-compile.sh OPENCL=1 AUDIO=1
 ```
 
 ### Build Viewer
@@ -80,6 +90,9 @@ sudo pacman -S sdl2 libjpeg-turbo
 # Build
 cd viewer
 make
+
+# With audio support:
+make AUDIO=1
 ```
 
 ### Deploy to Device
@@ -107,6 +120,7 @@ Optional:
   --hw-jpeg          Use hardware JPEG encoder
   --dmabuf           Use wlr-export-dmabuf for zero-copy capture
   --opencl           Use OpenCL GPU conversion (auto-enables --dmabuf --hw-jpeg)
+  --audio            Stream audio (requires AUDIO=1 build)
   --no-cursor        Don't overlay cursor in capture
 ```
 
@@ -129,13 +143,15 @@ wlcast/
 │   ├── opencl_convert.c # GPU color conversion
 │   ├── v4l2_jpeg.c     # Hardware JPEG encoder
 │   ├── compress.c      # Software JPEG (turbojpeg)
+│   ├── audio.c         # PulseAudio capture + Opus encoding
 │   ├── udp.c           # UDP fragmentation/sending
 │   ├── CL/             # OpenCL headers
 │   └── cross-compile.sh
 ├── viewer/             # Desktop-side receiver
 │   ├── main.c
 │   ├── network.c       # UDP receive/reassembly
-│   └── decode.c        # JPEG decoding
+│   ├── decode.c        # JPEG decoding
+│   └── audio.c         # Opus decoding + SDL playback
 ├── common/
 │   └── protocol.h      # Shared UDP protocol definition
 ├── protocol/           # Wayland protocol XML files

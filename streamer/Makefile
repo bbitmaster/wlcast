@@ -23,6 +23,20 @@ else
 OPENCL_SRC :=
 endif
 
+# Audio support (requires libpulse-simple and libopus)
+# Enable with: make AUDIO=1
+ifdef AUDIO
+PULSE_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags libpulse-simple 2>/dev/null)
+PULSE_LIBS ?= $(shell $(PKG_CONFIG) --libs libpulse-simple 2>/dev/null)
+OPUS_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags opus 2>/dev/null)
+OPUS_LIBS ?= $(shell $(PKG_CONFIG) --libs opus 2>/dev/null)
+CFLAGS += -DHAVE_AUDIO $(PULSE_CFLAGS) $(OPUS_CFLAGS)
+LDLIBS += $(PULSE_LIBS) $(OPUS_LIBS) -lpthread -lm
+AUDIO_SRC := audio.c
+else
+AUDIO_SRC :=
+endif
+
 GEN_DIR := gen
 
 SCREENCOPY_XML := ../protocol/wlr-screencopy-unstable-v1.xml
@@ -33,7 +47,7 @@ DMABUF_XML := ../protocol/wlr-export-dmabuf-unstable-v1.xml
 DMABUF_HEADER := $(GEN_DIR)/wlr-export-dmabuf-unstable-v1-client-protocol.h
 DMABUF_CODE := $(GEN_DIR)/wlr-export-dmabuf-unstable-v1-protocol.c
 
-SRC := main.c capture.c capture_dmabuf.c compress.c udp.c v4l2_jpeg.c v4l2_rga.c $(OPENCL_SRC) $(SCREENCOPY_CODE) $(DMABUF_CODE)
+SRC := main.c capture.c capture_dmabuf.c compress.c udp.c v4l2_jpeg.c v4l2_rga.c $(OPENCL_SRC) $(AUDIO_SRC) $(SCREENCOPY_CODE) $(DMABUF_CODE)
 OBJ := $(SRC:.c=.o)
 BIN := wlcast-stream
 

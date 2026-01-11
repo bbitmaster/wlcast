@@ -8,6 +8,10 @@
 #include "decode.h"
 #include "network.h"
 
+#ifdef HAVE_AUDIO
+#include "audio.h"
+#endif
+
 static void print_usage(const char *prog) {
   fprintf(stderr, "Usage: %s [--port <port>]\n", prog);
 }
@@ -71,6 +75,13 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+#ifdef HAVE_AUDIO
+  struct audio_player *audio_player = NULL;
+  if (audio_player_init(&audio_player) != 0) {
+    fprintf(stderr, "Warning: Failed to init audio player, continuing without audio\n");
+  }
+#endif
+
   SDL_Texture *texture = NULL;
   int tex_w = 0;
   int tex_h = 0;
@@ -126,6 +137,16 @@ int main(int argc, char **argv) {
       }
     }
 
+#ifdef HAVE_AUDIO
+    /* Process any pending audio packets */
+    if (audio_player) {
+      struct audio_packet audio;
+      while (udp_receiver_poll_audio(receiver, &audio)) {
+        audio_player_process_packet(audio_player, audio.data, audio.size);
+      }
+    }
+#endif
+
     uint32_t now = SDL_GetTicks();
     if (now - last_fps_tick >= 1000u) {
       char title[128];
@@ -148,6 +169,11 @@ int main(int argc, char **argv) {
   if (texture) {
     SDL_DestroyTexture(texture);
   }
+#ifdef HAVE_AUDIO
+  if (audio_player) {
+    audio_player_destroy(audio_player);
+  }
+#endif
   jpeg_decoder_destroy(&decoder);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);

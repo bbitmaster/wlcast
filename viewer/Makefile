@@ -12,7 +12,19 @@ TURBOJPEG_LIBS ?= $(shell $(PKG_CONFIG) --libs libturbojpeg 2>/dev/null)
 CFLAGS += $(SDL_CFLAGS) $(TURBOJPEG_CFLAGS)
 LDLIBS += $(SDL_LIBS) $(TURBOJPEG_LIBS)
 
-SRC := main.c network.c decode.c
+# Audio support (requires libopus)
+# Enable with: make AUDIO=1
+ifdef AUDIO
+OPUS_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags opus 2>/dev/null)
+OPUS_LIBS ?= $(shell $(PKG_CONFIG) --libs opus 2>/dev/null)
+CFLAGS += -DHAVE_AUDIO $(OPUS_CFLAGS)
+LDLIBS += $(OPUS_LIBS)
+AUDIO_SRC := audio.c
+else
+AUDIO_SRC :=
+endif
+
+SRC := main.c network.c decode.c $(AUDIO_SRC)
 OBJ := $(SRC:.c=.o)
 BIN := wlcast-view
 
